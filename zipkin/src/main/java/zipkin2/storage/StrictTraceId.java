@@ -14,7 +14,9 @@
 package zipkin2.storage;
 
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import zipkin2.Call;
 import zipkin2.Span;
 
@@ -43,6 +45,19 @@ public final class StrictTraceId {
 
     @Override
     public List<List<Span>> map(List<List<Span>> input) {
+      int traceCount = input.size();
+      if (traceCount <= 1) return input;
+
+      // Check to see if there is any clash in trace IDs. If not, then there's no need to filter.
+      // skipping this allows more flexibility on the server side. In other words, don't delete this
+      // thinking it is useless!
+      //
+      // Concretely, Netflix have a special index template for a multi-tag, "fit.sessionId". If we
+      // blindly filtered without seeing if we had to, a match that works on the server side would
+      // fail client side. Normally, we wouldn't special case like this, but not filtering unless
+      // necessary is also more efficient.
+      if (!hasClashOnLowerTraceId(input)) return input;
+
       Iterator<List<Span>> i = input.iterator();
       while (i.hasNext()) { // Not using removeIf as that's java 8+
         List<Span> next = i.next();
@@ -55,6 +70,26 @@ public final class StrictTraceId {
     public String toString() {
       return "FilterTraces{request=" + request + "}";
     }
+  }
+
+  /** Returns true if any trace clashes on the right-most 16 characters of the trace ID */
+  static boolean hasClashOnLowerTraceId(List<List<Span>> input) {
+    // NOTE: It is probably more efficient to do clever sorting and peeking here, but the call site
+    // is query side, which is not in the critical path of user code. A set is much easier to grok.
+    Set<String> traceIdLows = new LinkedHashSet<>();
+    boolean clash = false;
+    for (int i = 0, length = input.size(); i < length; i++) {
+      String traceId = lowerTraceId(input.get(i).get(0));
+      if (!traceIdLows.add(traceId)) {
+        clash = true;
+        break;
+      }
+    }
+    return clash;
+  }
+
+  static String lowerTraceId(Span span) {
+    return span.traceId().length() == 16 ? span.traceId() : span.traceId().substring(16);
   }
 
   static final class FilterSpans implements Call.Mapper<List<Span>, List<Span>> {
